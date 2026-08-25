@@ -1,11 +1,13 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath, URL } from 'node:url';
 import { SpotifyApi } from '@spotify/web-api-ts-sdk';
 import open from 'open';
+import lockfile from 'proper-lockfile';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILE = path.join(__dirname, '../spotify-config.json');
@@ -44,10 +46,72 @@ export function loadSpotifyConfig(): SpotifyConfig {
 }
 
 export function saveSpotifyConfig(config: SpotifyConfig): void {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
+  // Write atomically (temp file + rename) so a concurrent reader never sees
+  // a partially-written file, and so two concurrent writers can't interleave
+  // and produce a corrupted/malformed JSON file.
+  const tmpFile = path.join(
+    os.tmpdir(),
+    `spotify-config.${process.pid}.${crypto.randomUUID()}.tmp`,
+  );
+  fs.writeFileSync(tmpFile, JSON.stringify(config, null, 2), 'utf8');
+  fs.renameSync(tmpFile, CONFIG_FILE);
 }
 
 let cachedSpotifyApi: SpotifyApi | null = null;
+
+/**
+ * Multiple MCP server processes (one per Claude Code session with this
+ * server connected) can be running concurrently, all reading and writing
+ * the same spotify-config.json. Spotify rotates the refresh token on every
+ * refresh, so without cross-process coordination two processes refreshing
+ * near-simultaneously can race: the loser sends an already-rotated (now
+ * stale) refresh token, gets rejected, and its failure handler would
+ * overwrite the winner's fresh tokens. `withConfigLock` serializes the
+ * read-refresh-write critical section across all processes via an on-disk
+ * lockfile so only one process refreshes at a time, and re-reads the config
+ * from disk after acquiring the lock so a process that was waiting picks up
+ * whatever another process already wrote instead of acting on stale data.
+ */
+async function withConfigLock<T>(fn: () => Promise<T>): Promise<T> {
+  const release = await lockfile.lock(CONFIG_FILE, {
+    retries: { retries: 10, factor: 1.5, minTimeout: 100, maxTimeout: 2000 },
+    stale: 30000,
+  });
+  try {
+    return await fn();
+  } finally {
+    await release();
+  }
+}
+
+/**
+ * Returns a config with a guaranteed-fresh access token, refreshing (and
+ * persisting the refresh under the config lock) if needed. Always re-reads
+ * from disk while holding the lock, so it never acts on a config snapshot
+ * that another process may have already refreshed since it was last read.
+ */
+async function getFreshConfig(): Promise<SpotifyConfig> {
+  return withConfigLock(async () => {
+    const config = loadSpotifyConfig();
+    const now = Date.now();
+    if (config.accessToken && config.refreshToken) {
+      const shouldRefresh =
+        !config.expiresAt || config.expiresAt <= now + 5 * 60 * 1000;
+      if (shouldRefresh) {
+        console.error(
+          'Access token expired or missing expiration time, refreshing...',
+        );
+        const tokens = await refreshAccessToken(config);
+        config.accessToken = tokens.access_token;
+        config.expiresAt = now + tokens.expires_in * 1000;
+        saveSpotifyConfig(config);
+        console.error('Access token refreshed successfully');
+        cachedSpotifyApi = null;
+      }
+    }
+    return config;
+  });
+}
 
 /**
  * Direct Spotify Web API fetch helper.
@@ -66,19 +130,7 @@ export async function spotifyFetch<T = unknown>(
   } = {},
 ): Promise<T> {
   const { method = 'GET', body, query } = options;
-  const config = loadSpotifyConfig();
-
-  // Refresh token if expired
-  if (config.accessToken && config.refreshToken) {
-    const now = Date.now();
-    if (!config.expiresAt || config.expiresAt <= now) {
-      const tokens = await refreshAccessToken(config);
-      config.accessToken = tokens.access_token;
-      config.expiresAt = now + tokens.expires_in * 1000;
-      saveSpotifyConfig(config);
-      cachedSpotifyApi = null;
-    }
-  }
+  const config = await getFreshConfig();
 
   if (!config.accessToken) {
     throw new Error(
@@ -121,38 +173,22 @@ export async function spotifyFetch<T = unknown>(
 }
 
 export async function createSpotifyApi(): Promise<SpotifyApi> {
-  const config = loadSpotifyConfig();
+  let config: SpotifyConfig;
+  try {
+    config = await getFreshConfig();
+  } catch (error) {
+    console.error('Failed to refresh token:', error);
+    throw new Error(
+      'Failed to refresh access token. Please run "npm run auth" to re-authenticate.',
+    );
+  }
 
   if (config.accessToken && config.refreshToken) {
-    const now = Date.now();
-    const shouldRefresh =
-      !config.expiresAt || config.expiresAt <= now + 5 * 60 * 1000;
-
-    if (shouldRefresh) {
-      console.error(
-        'Access token expired or missing expiration time, refreshing...',
-      );
-      try {
-        const tokens = await refreshAccessToken(config);
-        config.accessToken = tokens.access_token;
-        config.expiresAt = now + tokens.expires_in * 1000; // Convert seconds to milliseconds
-        saveSpotifyConfig(config);
-        console.error('Access token refreshed successfully');
-
-        // Clear cached API instance to force recreation with new token
-        cachedSpotifyApi = null;
-      } catch (error) {
-        console.error('Failed to refresh token:', error);
-        throw new Error(
-          'Failed to refresh access token. Please run "npm run auth" to re-authenticate.',
-        );
-      }
-    }
-
     if (cachedSpotifyApi) {
       return cachedSpotifyApi;
     }
 
+    const now = Date.now();
     const accessToken = {
       access_token: config.accessToken,
       token_type: 'Bearer',
@@ -229,6 +265,12 @@ async function exchangeCodeForToken(
   };
 }
 
+/**
+ * Only call this while holding the config lock (see `getFreshConfig` /
+ * `withConfigLock`) — on `invalid_grant` it discards the tokens and saves,
+ * which would clobber a concurrent process's freshly-rotated tokens if two
+ * processes could reach this at once.
+ */
 async function refreshAccessToken(
   config: SpotifyConfig,
 ): Promise<{ access_token: string; expires_in: number }> {
