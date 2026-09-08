@@ -3,130 +3,17 @@ import { defineTool } from './tool.js';
 import type { SpotifyHandlerExtra } from './types.js';
 import { handleSpotifyRequest } from './utils.js';
 
-const followOrUnfollowArtists = defineTool({
-  name: 'followOrUnfollowArtists',
-  description: "Follow or unfollow artists on the user's Spotify account",
-  schema: {
-    artistIds: z
-      .array(z.string())
-      .max(50)
-      .describe('Array of Spotify artist IDs (max 50)'),
-    action: z
-      .enum(['follow', 'unfollow'])
-      .describe('Action to perform: follow or unfollow'),
-  },
-  handler: async (args, _extra: SpotifyHandlerExtra) => {
-    const { artistIds, action } = args;
-
-    if (artistIds.length === 0) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: 'Error: No artist IDs provided',
-          },
-        ],
-      };
-    }
-
-    try {
-      await handleSpotifyRequest(async (spotifyApi) => {
-        return action === 'follow'
-          ? await spotifyApi.currentUser.followArtistsOrUsers(
-              artistIds,
-              'artist',
-            )
-          : await spotifyApi.currentUser.unfollowArtistsOrUsers(
-              artistIds,
-              'artist',
-            );
-      });
-
-      const actionPastTense = action === 'follow' ? 'followed' : 'unfollowed';
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Successfully ${actionPastTense} ${artistIds.length} artist${artistIds.length === 1 ? '' : 's'}`,
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Error ${action === 'follow' ? 'following' : 'unfollowing'} artists: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          },
-        ],
-      };
-    }
-  },
-});
-
-const checkFollowedArtists = defineTool({
-  name: 'checkFollowedArtists',
-  description: "Check whether artists are followed on the user's account",
-  schema: {
-    artistIds: z
-      .array(z.string())
-      .max(50)
-      .describe('Array of Spotify artist IDs to check (max 50)'),
-  },
-  handler: async (args, _extra: SpotifyHandlerExtra) => {
-    const { artistIds } = args;
-
-    if (artistIds.length === 0) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: 'Error: No artist IDs provided',
-          },
-        ],
-      };
-    }
-
-    try {
-      const followedStatus = await handleSpotifyRequest(async (spotifyApi) => {
-        return await spotifyApi.currentUser.followsArtistsOrUsers(
-          artistIds,
-          'artist',
-        );
-      });
-
-      const formattedResults = artistIds
-        .map((artistId, i) => {
-          const isFollowed = followedStatus[i];
-          return `${i + 1}. ${artistId}: ${isFollowed ? 'Followed' : 'Not followed'}`;
-        })
-        .join('\n');
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `# Artist Follow Status\n\n${formattedResults}`,
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Error checking followed artists: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          },
-        ],
-      };
-    }
-  },
-});
+// NOTE: Spotify deprecated the follow/unfollow-artist and
+// follow-contains-check endpoints ("Use Save Items to Library instead" —
+// developer.spotify.com/documentation/web-api/reference/follow-artists-users).
+// Live-verified 2026-09-08: both now return 403 ("wrong consumer key" — the
+// generic error Spotify's gateway gives for a retired endpoint; the message
+// explicitly notes re-authenticating won't help). Worse, the replacement
+// "Save Items to Library" endpoint's supported types (track/album/episode/
+// show/audiobook/user/playlist) don't include artist at all — there is
+// currently no Spotify Web API endpoint that can follow an artist, for any
+// app. Only the read side (getFollowedArtists below) still works. Do not
+// re-add a follow/unfollow-artist tool unless Spotify ships a replacement.
 
 const getFollowedArtists = defineTool({
   name: 'getFollowedArtists',
@@ -201,8 +88,4 @@ const getFollowedArtists = defineTool({
   },
 });
 
-export const artistTools = [
-  followOrUnfollowArtists,
-  checkFollowedArtists,
-  getFollowedArtists,
-];
+export const artistTools = [getFollowedArtists];
