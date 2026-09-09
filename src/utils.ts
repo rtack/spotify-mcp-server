@@ -73,14 +73,27 @@ let cachedSpotifyApi: SpotifyApi | null = null;
  * whatever another process already wrote instead of acting on stale data.
  */
 async function withConfigLock<T>(fn: () => Promise<T>): Promise<T> {
-  const release = await lockfile.lock(CONFIG_FILE, {
-    retries: { retries: 10, factor: 1.5, minTimeout: 100, maxTimeout: 2000 },
-    stale: 30000,
-  });
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await lockfile.lock(CONFIG_FILE, {
+      retries: { retries: 10, factor: 1.5, minTimeout: 100, maxTimeout: 2000 },
+      stale: 30000,
+    });
+  } catch (error) {
+    // Nothing to serialize access to if the file doesn't really exist on
+    // disk — proper-lockfile throws ENOENT for a missing target (via a real
+    // lstat, so this also fires in tests that mock fs.existsSync/readFile
+    // without a backing file). Falling through here lets loadSpotifyConfig
+    // below give its friendlier "configuration file not found" error
+    // instead of masking it with a raw ENOENT.
+    if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
   try {
     return await fn();
   } finally {
-    await release();
+    await release?.();
   }
 }
 
