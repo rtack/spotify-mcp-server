@@ -16,6 +16,7 @@ export const toolNames = [
   'getUsersSavedTracks',
   'getQueue',
   'getAvailableDevices',
+  'getFollowedArtists',
   'removeUsersSavedTracks',
   'getTopTracks',
   'getTopArtists',

@@ -22,6 +22,8 @@ export function mockConfig(t, overrides = {}) {
   const exists = fs.existsSync;
   const read = fs.readFileSync;
   const write = fs.writeFileSync;
+  const rename = fs.renameSync;
+  const unlink = fs.unlinkSync;
   t.mock.method(
     fs,
     'existsSync',
@@ -33,6 +35,20 @@ export function mockConfig(t, overrides = {}) {
   t.mock.method(fs, 'writeFileSync', (path, data, ...args) => {
     if (path === configPath) config = JSON.parse(data);
     else write(path, data, ...args);
+  });
+  // saveSpotifyConfig writes atomically: real content lands in a real temp
+  // file, then gets moved onto configPath via renameSync — never a direct
+  // writeFileSync(configPath, ...), so that's the call to intercept here too.
+  // Read the (really-written) temp file for the new config, delete it
+  // instead of actually renaming it onto disk, and skip past the real
+  // fs.renameSync entirely.
+  t.mock.method(fs, 'renameSync', (src, dest) => {
+    if (dest === configPath) {
+      config = JSON.parse(read(src, 'utf8'));
+      unlink(src);
+    } else {
+      rename(src, dest);
+    }
   });
   return () => config;
 }
