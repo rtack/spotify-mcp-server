@@ -86,7 +86,10 @@ async function withConfigLock<T>(fn: () => Promise<T>): Promise<T> {
     // without a backing file). Falling through here lets loadSpotifyConfig
     // below give its friendlier "configuration file not found" error
     // instead of masking it with a raw ENOENT.
-    if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') {
+    if (
+      !(error instanceof Error && 'code' in error) ||
+      error.code !== 'ENOENT'
+    ) {
       throw error;
     }
   }
